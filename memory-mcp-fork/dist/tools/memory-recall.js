@@ -64,24 +64,30 @@ export function memoryRecall(db, options) {
         // PHASE 1: Create index (all matches as minimal summaries)
         const index = formatMemoryList(memories, 'minimal');
         const indexTokens = estimateTokens(index);
-        // PHASE 2: Fill remaining budget with detailed content
+        // PHASE 2: Fill details budget separately (index doesn't eat into it)
         const details = [];
-        let tokensUsed = indexTokens;
+        let detailTokens = 0;
         for (const memory of memories) {
             // Format with standard detail (content + entities + timestamps)
             const options = optionsMap.get(memory.id) || {};
             const formatted = formatMemory(memory, 'standard', options);
             const memoryTokens = getMemoryTokenCount(formatted);
-            // Check if it fits in remaining budget
-            if (tokensUsed + memoryTokens <= maxTokens) {
+            // Details get their own full budget allocation
+            if (detailTokens + memoryTokens <= maxTokens) {
                 details.push(formatted);
-                tokensUsed += memoryTokens;
+                detailTokens += memoryTokens;
+            }
+            else if (details.length === 0) {
+                // Always include at least one detail, even if over budget
+                details.push(formatted);
+                detailTokens += memoryTokens;
+                break;
             }
             else {
-                // Budget exhausted, stop adding details
                 break;
             }
         }
+        const tokensUsed = indexTokens + detailTokens;
         // Build response with dual structure
         const response = {
             index,
