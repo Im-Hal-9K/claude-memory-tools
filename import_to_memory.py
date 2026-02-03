@@ -42,16 +42,20 @@ def get_db(db_path: Path) -> sqlite3.Connection:
 
 
 def generate_summary(content: str) -> str:
-    """Generate a 15-25 word summary matching MCP's format."""
+    """Generate a descriptive summary from markdown content."""
     text = content.strip()
     # Skip YAML frontmatter
     if text.startswith("---"):
         parts = text.split("---", 2)
         if len(parts) >= 3:
             text = parts[2].strip()
-    # Strip markdown headers
+    # Strip markdown formatting
     text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
     text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+    text = text.strip()
+
+    # Collect headings as topic indicators
+    headings = re.findall(r'^#+\s+(.+)$', content, flags=re.MULTILINE)
 
     # Try first sentence
     match = re.match(r'^[^.!?\n]+[.!?]', text)
@@ -59,7 +63,15 @@ def generate_summary(content: str) -> str:
         s = match.group(0).strip()
         words = s.split()
         if 3 <= len(words) <= 25:
+            # Append heading context if available
+            if headings and headings[0].lower() not in s.lower():
+                return f"{headings[0]}: {s}"[:150]
             return s
+
+    # Use first heading + first 15 words
+    if headings:
+        words = text.split()[:15]
+        return f"{headings[0]}: {' '.join(words)}..."[:150]
 
     # First 20 words
     words = text.split()[:20]

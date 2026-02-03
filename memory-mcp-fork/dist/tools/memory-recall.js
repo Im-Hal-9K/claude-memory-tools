@@ -15,7 +15,7 @@ export function memoryRecall(db, options) {
         console.error('[memoryRecall] Starting recall with options:', JSON.stringify(options));
         // Set defaults
         const limit = Math.min(options.limit || 20, 50); // Max 50
-        const maxTokens = options.max_tokens || 1000; // Default 1k token budget
+        const maxTokens = options.max_tokens || 4000; // Default 4k token budget
         console.error(`[memoryRecall] Processed options - limit: ${limit}, maxTokens: ${maxTokens}`);
         // Perform semantic search (get all matches up to limit)
         const searchOptions = {

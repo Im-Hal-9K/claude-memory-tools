@@ -47,6 +47,22 @@ def get_db_path() -> Path:
 DB_PATH = get_db_path()
 
 
+SENSITIVE_PATTERNS = [
+    (re.compile(r'sk-ant-api\S+'), '[REDACTED_API_KEY]'),
+    (re.compile(r'sk-[a-zA-Z0-9]{20,}'), '[REDACTED_KEY]'),
+    (re.compile(r'ghp_[a-zA-Z0-9]{36,}'), '[REDACTED_GITHUB_TOKEN]'),
+    (re.compile(r'(?i)api[_-]?key\s*[:=]\s*["\']?[\w-]{20,}'), '[REDACTED_API_KEY]'),
+    (re.compile(r'(?i)password\s*[:=]\s*["\'][^"\']{8,}["\']'), '[REDACTED_PASSWORD]'),
+]
+
+
+def scrub_sensitive(text: str) -> str:
+    """Remove API keys, tokens, and other sensitive patterns from text."""
+    for pattern, replacement in SENSITIVE_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def extract_text_from_message(msg: dict) -> str:
     """Extract readable text from a JSONL message."""
     # JSONL uses "type" for role at top level; nested "message" dict has "role" too
@@ -98,7 +114,7 @@ def extract_text_from_message(msg: dict) -> str:
     else:
         content = ""
 
-    text = content.strip()
+    text = scrub_sensitive(content.strip())
     if not text:
         return ""
 
@@ -135,15 +151,18 @@ def derive_project_name(folder_name: str) -> str:
 
 
 def generate_summary(text: str) -> str:
-    """Generate a 15-25 word summary matching MCP's format."""
+    """Generate a 15-25 word summary from text content."""
     text = text.strip()
     if text.startswith("---"):
         parts = text.split("---", 2)
         if len(parts) >= 3:
             text = parts[2].strip()
-    # Strip markdown headers
+    # Strip markdown formatting
     text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
     text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+    # Strip tool call annotations
+    text = re.sub(r'\[(?:Read|Write|Edit|Bash|WebSearch|WebFetch|Tool)[^\]]*\]', '', text)
+    text = text.strip()
 
     # Try first sentence
     match = re.match(r'^[^.!?\n]+[.!?]', text)
@@ -160,8 +179,58 @@ def generate_summary(text: str) -> str:
     return text[:100]
 
 
+def generate_chunk_summary(chunk_parts: list[str], project_name: str, chunk_num: int) -> str:
+    """Generate a descriptive summary for a chunk by extracting key topics."""
+    # Collect user messages — they indicate what the chunk is about
+    user_topics = []
+    for part in chunk_parts:
+        if part.startswith("**User:**"):
+            msg = part[len("**User:**"):].strip()
+            # Skip very short responses (confirmations, "yes", "ok", etc.)
+            if len(msg) > 20:
+                # Clean up tool annotations
+                msg = re.sub(r'\[(?:Read|Write|Edit|Bash|WebSearch|WebFetch|Tool)[^\]]*\]', '', msg).strip()
+                if msg:
+                    user_topics.append(msg)
+
+    if user_topics:
+        # Use the first substantive user message as the topic
+        topic = user_topics[0]
+        # Truncate to ~20 words
+        words = topic.split()[:20]
+        topic_text = " ".join(words)
+        if len(words) == 20:
+            topic_text += "..."
+    else:
+        # Fall back to first part of chunk
+        topic_text = generate_summary(chunk_parts[0])
+
+    prefix = f"Session {project_name} pt{chunk_num}"
+    return f"{prefix}: {topic_text}"[:200]
+
+
+def is_topic_shift(part: str, prev_part: str) -> bool:
+    """Detect if a user message represents a new topic/request."""
+    if not part.startswith("**User:**"):
+        return False
+    msg = part[len("**User:**"):].strip()
+    # Short confirmations aren't topic shifts
+    if len(msg) < 30:
+        return False
+    # Questions and requests are likely new topics
+    if any(msg.lower().startswith(w) for w in
+           ["can you", "how do", "what", "where", "why", "help me", "i need",
+            "i want", "please", "let's", "now ", "next ", "okay so",
+            "hey ", "alright"]):
+        return True
+    # If it's long enough and follows a Claude message, likely a new topic
+    if prev_part.startswith("**Claude:**") and len(msg) > 80:
+        return True
+    return False
+
+
 def chunk_session(messages: list[dict], project: str, session_id: str) -> list[tuple[str, str]]:
-    """Split session into chunks. Returns list of (content, summary) tuples."""
+    """Split session into topic-aware chunks. Returns list of (content, summary) tuples."""
     # Extract all text
     text_parts = []
     for msg in messages:
@@ -172,29 +241,38 @@ def chunk_session(messages: list[dict], project: str, session_id: str) -> list[t
     if not text_parts:
         return []
 
-    # Get session topic from first user message
-    topic = extract_first_user_message(messages)
     project_name = derive_project_name(project)
-
     full_text = "\n\n".join(text_parts)
 
     # If small enough, single chunk
     if len(full_text) <= CHUNK_SIZE:
+        topic = extract_first_user_message(messages)
         summary = f"Session in {project_name}: {generate_summary(topic or full_text)}"
-        return [(full_text, summary[:150])]
+        return [(full_text, summary[:200])]
 
-    # Split into chunks by message boundaries
+    # Topic-aware chunking: split at topic shifts or size limits
     chunks = []
     current_chunk = []
     current_size = 0
     chunk_num = 0
 
-    for part in text_parts:
-        if current_size + len(part) > CHUNK_SIZE and current_chunk:
+    for i, part in enumerate(text_parts):
+        prev_part = text_parts[i - 1] if i > 0 else ""
+
+        # Split if: topic shift AND chunk is big enough, OR size limit exceeded
+        should_split = False
+        if current_chunk:
+            if current_size + len(part) > CHUNK_SIZE:
+                should_split = True
+            elif current_size > CHUNK_SIZE // 3 and is_topic_shift(part, prev_part):
+                # Topic shift, but only split if chunk has enough content (~1300+ chars)
+                should_split = True
+
+        if should_split:
             chunk_num += 1
             chunk_text = "\n\n".join(current_chunk)
-            chunk_summary = f"Session {project_name} pt{chunk_num}: {generate_summary(current_chunk[0])}"
-            chunks.append((chunk_text, chunk_summary[:150]))
+            chunk_summary = generate_chunk_summary(current_chunk, project_name, chunk_num)
+            chunks.append((chunk_text, chunk_summary))
             current_chunk = [part]
             current_size = len(part)
         else:
@@ -205,8 +283,8 @@ def chunk_session(messages: list[dict], project: str, session_id: str) -> list[t
     if current_chunk:
         chunk_num += 1
         chunk_text = "\n\n".join(current_chunk)
-        chunk_summary = f"Session {project_name} pt{chunk_num}: {generate_summary(current_chunk[0])}"
-        chunks.append((chunk_text, chunk_summary[:150]))
+        chunk_summary = generate_chunk_summary(current_chunk, project_name, chunk_num)
+        chunks.append((chunk_text, chunk_summary))
 
     return chunks
 
