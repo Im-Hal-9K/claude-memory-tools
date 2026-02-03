@@ -1,0 +1,10 @@
+node_modules/
+*.db
+session_exports/
+memories/
+*.pyc
+__pycache__/
+.env
+nul
+Logoutput.txt
+.claude/

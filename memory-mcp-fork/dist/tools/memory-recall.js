@@ -1,0 +1,106 @@
+/**
+ * Memory recall tool - Token-aware semantic search
+ * v3.0: Dual-response pattern (index + details) for skill-like progressive loading
+ */
+import { semanticSearch } from '../search/semantic-search.js';
+import { formatMemory, formatMemoryList, getMemoryTokenCount } from './response-formatter.js';
+import { now } from '../database/connection.js';
+import { estimateTokens } from '../utils/token-estimator.js';
+/**
+ * Recall memories using semantic search with intelligent token budgeting
+ * Returns: index (all matches as summaries) + details (top matches with full content)
+ */
+export function memoryRecall(db, options) {
+    try {
+        console.error('[memoryRecall] Starting recall with options:', JSON.stringify(options));
+        // Set defaults
+        const limit = Math.min(options.limit || 20, 50); // Max 50
+        const maxTokens = options.max_tokens || 1000; // Default 1k token budget
+        console.error(`[memoryRecall] Processed options - limit: ${limit}, maxTokens: ${maxTokens}`);
+        // Perform semantic search (get all matches up to limit)
+        const searchOptions = {
+            query: options.query,
+            limit,
+            offset: 0,
+            includeExpired: false,
+        };
+        if (options.type)
+            searchOptions.type = options.type;
+        if (options.entities)
+            searchOptions.entities = options.entities;
+        console.error('[memoryRecall] Calling semanticSearch...');
+        const { results, totalCount } = semanticSearch(db, searchOptions);
+        console.error(`[memoryRecall] Search returned ${results.length} results, total count: ${totalCount}`);
+        // Track access for frequency tracking
+        const currentTime = now();
+        for (const result of results) {
+            // Increment access_count and update last_accessed
+            db.prepare(`UPDATE memories
+         SET access_count = access_count + 1, last_accessed = ?
+         WHERE id = ?`).run(currentTime, result.id);
+        }
+        // Build options map for formatting (includes entities and provenance)
+        const optionsMap = new Map();
+        for (const result of results) {
+            optionsMap.set(result.id, {
+                entities: result.entities,
+                provenance: result.provenance,
+            });
+        }
+        // Convert MemorySearchResult[] to Memory[] for formatting
+        const memories = results.map((result) => ({
+            id: result.id,
+            content: result.content,
+            summary: result.summary,
+            type: result.type,
+            importance: result.importance,
+            created_at: result.created_at,
+            last_accessed: result.last_accessed,
+            access_count: result.access_count,
+            expires_at: result.expires_at,
+            metadata: result.metadata,
+            is_deleted: result.is_deleted,
+        }));
+        // PHASE 1: Create index (all matches as minimal summaries)
+        const index = formatMemoryList(memories, 'minimal');
+        const indexTokens = estimateTokens(index);
+        // PHASE 2: Fill remaining budget with detailed content
+        const details = [];
+        let tokensUsed = indexTokens;
+        for (const memory of memories) {
+            // Format with standard detail (content + entities + timestamps)
+            const options = optionsMap.get(memory.id) || {};
+            const formatted = formatMemory(memory, 'standard', options);
+            const memoryTokens = getMemoryTokenCount(formatted);
+            // Check if it fits in remaining budget
+            if (tokensUsed + memoryTokens <= maxTokens) {
+                details.push(formatted);
+                tokensUsed += memoryTokens;
+            }
+            else {
+                // Budget exhausted, stop adding details
+                break;
+            }
+        }
+        // Build response with dual structure
+        const response = {
+            index,
+            details,
+            total_count: totalCount,
+            has_more: totalCount > limit,
+            tokens_used: tokensUsed,
+            query: options.query,
+        };
+        console.error(`[memoryRecall] Built response - index: ${index.length} items, details: ${details.length} items, tokens: ${tokensUsed}`);
+        console.error('[memoryRecall] Recall completed successfully');
+        return response;
+    }
+    catch (error) {
+        console.error('[memoryRecall] ERROR:', error);
+        if (error instanceof Error) {
+            console.error('[memoryRecall] Error stack:', error.stack);
+        }
+        throw error;
+    }
+}
+//# sourceMappingURL=memory-recall.js.map

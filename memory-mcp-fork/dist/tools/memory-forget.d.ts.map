@@ -1,0 +1,1 @@
+{"version":3,"file":"memory-forget.d.ts","sourceRoot":"","sources":["../../src/tools/memory-forget.ts"],"names":[],"mappings":"AAAA;;GAEG;AAEH,OAAO,KAAK,EAAE,QAAQ,EAAE,MAAM,0BAA0B,CAAC;AACzD,OAAO,KAAK,EAAE,cAAc,EAAE,MAAM,mBAAmB,CAAC;AAIxD;;GAEG;AACH,wBAAgB,YAAY,CAC1B,EAAE,EAAE,QAAQ,EACZ,EAAE,EAAE,MAAM,EACV,MAAM,CAAC,EAAE,MAAM,GACd,cAAc,CAwChB"}
